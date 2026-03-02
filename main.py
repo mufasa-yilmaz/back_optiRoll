@@ -654,5 +654,7 @@ async def validate_input(request: OptimizeRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Railway (ve benzeri platformlar) PORT env değişkeni verir; yoksa local için 8000
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
