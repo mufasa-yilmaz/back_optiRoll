@@ -23,6 +23,7 @@ class _FakeTable:
         self._db = db
         self._name = name
         self._payload = None
+        
 
     def insert(self, payload):
         """Insert payload'ını saklar ve zincirleme çağrı için self döner."""
