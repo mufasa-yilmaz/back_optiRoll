@@ -45,6 +45,32 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 API dokümantasyonu: http://localhost:8000/docs
 
+## Fire / kurulum / sıra cezası karşılaştırma grid’i
+
+5 sipariş + `rolls_band (4–13)` ile farklı **toplam rulo kapasitesi**, **fire maliyeti çarpanı** ve **`interleavingPenaltyCost`** kombinasyonlarını tarayıp:
+
+- Fire ucuzken fire üretimi (referansa göre),
+- Fire pahalıyken kesim/hat geçiş metriklerinde artış
+
+gösteren hücreleri `_karsilastirma/` altında özetler. **Rulo açma maliyeti** `setupCost` (grid’de çarpan 1.0 sabit); **sıra cezası** `interleavingPenaltyCost`.
+
+```bash
+cd backend
+# Tam grid (birkaç dakika sürebilir)
+python run_fire_setup_comparison.py
+
+# Dar tarama
+python run_fire_setup_comparison.py --quick
+
+# Birkaç koşu (keşif / unittest ile aynı mantık)
+python run_fire_setup_comparison.py --minimal --time-limit 45
+
+# Regresyon (stdlib unittest; ~2 dk)
+python -m unittest test_fire_setup_comparison -v
+```
+
+Çıktı: `reports/fire_setup_grid_runs/fire_setup_grid_<timestamp>/` — OFAT/tez ile karışmaz.
+
 ## API Endpoints
 
 - `POST /api/optimize` - Optimizasyon çalıştır

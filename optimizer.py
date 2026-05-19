@@ -63,6 +63,48 @@ def _split_remainder_kg(rem_kg: int) -> Tuple[int, int]:
     return 0, r
 
 
+def _lp_kg_flow_to_int(kg_flow: float) -> int:
+    """
+    LP akış değişkenlerini (u, x, x_u, x_l, R, F; birim kg) raporlama için tam sayı kg'ye çevirir.
+
+    Args:
+        kg_flow: PuLP çözümünden okunan kg cinsinden sürekli değer.
+
+    Returns:
+        Yuvarlanmış tam sayı kilogram.
+    """
+    return max(0, int(round(float(kg_flow or 0.0))))
+
+
+def _panel_count_and_m2_from_kg(
+    miktar_kg: int,
+    panel_width: float,
+    panel_length: float,
+    rho_kg_per_m2: float,
+) -> Tuple[int, float]:
+    """
+    Kesim kg'sinden panel adedi ve m² üretir; panel alanına yuvarlayarak sipariş m² hedefi korunur.
+
+    Sürekli ton/m² ters dönüşümü (kg/rho) 203,99 gibi sapmalar üretebilir; panel adedi yuvarlaması
+    204 m² gibi tam panel ızgarasındaki taleplerle uyumludur.
+
+    Args:
+        miktar_kg: Kesilen malzeme (kg, tam sayı).
+        panel_width: Panel genişliği (m).
+        panel_length: Panel kesim uzunluğu (m).
+        rho_kg_per_m2: Malzeme yoğunluğu (kg/m²).
+
+    Returns:
+        (panel_count, m2) çifti.
+    """
+    panel_area_m2 = float(panel_width) * float(panel_length)
+    if miktar_kg <= 0 or panel_area_m2 <= 0 or rho_kg_per_m2 <= 0:
+        return 0, 0.0
+    panel_kg = panel_area_m2 * rho_kg_per_m2
+    panel_count = int(round(miktar_kg / panel_kg))
+    return panel_count, panel_count * panel_area_m2
+
+
 def _split_remainder_for_reporting(rem_ton: float) -> Tuple[float, float]:
     """
     Ton cinsinden kalanı kg'ye taşıyıp böler; API ton alanları için (geriye dönük yardımcı).
@@ -1731,32 +1773,25 @@ def solve_optimization(
     
     # Sonuçları çıkar (iç model kg, API çıkışı ton/m²).
     cutting_plan = []
-    birim_kg = {
-        j: _ton_to_kg_int(
-            panel_widths[j]
-            * (panel_lengths[j] if j < len(panel_lengths) else 1.0)
-            * (thickness / 1000)
-            * density
-        )
-        for j in J
-    }
     for i in I:
         for j in J:
+            pl = panel_lengths[j] if j < len(panel_lengths) else 1.0
+            pw = panel_widths[j]
             if dual_surface:
-                tu_kg = max(0, int(round(float(pulp.value(x_u[(i, j)]) or 0.0))))
-                tl_kg = max(0, int(round(float(pulp.value(x_l[(i, j)]) or 0.0))))
+                tu_kg = _lp_kg_flow_to_int(float(pulp.value(x_u[(i, j)]) or 0.0))
+                tl_kg = _lp_kg_flow_to_int(float(pulp.value(x_l[(i, j)]) or 0.0))
                 if tu_kg <= 0 and tl_kg <= 0:
                     continue
                 miktar_kg = tu_kg + tl_kg
                 miktar_ton = _kg_int_to_ton(miktar_kg)
-                miktar_m2 = (miktar_kg / rho_kg_per_m2) if rho_kg_per_m2 > 0 else 0.0
-                panel_count = int(round(miktar_kg / birim_kg[j])) if birim_kg[j] > 0 else 0
-                pl = panel_lengths[j] if j < len(panel_lengths) else 1.0
+                panel_count, miktar_m2 = _panel_count_and_m2_from_kg(
+                    miktar_kg, pw, pl, rho_kg_per_m2
+                )
                 cutting_plan.append({
                     "rollId": i + 1,
                     "orderId": j + 1,
                     "panelCount": panel_count,
-                    "panelWidth": panel_widths[j],
+                    "panelWidth": pw,
                     "panelLength": pl,
                     "tonnage": round(miktar_ton, 4),
                     "upperTonnage": round(_kg_int_to_ton(tu_kg), 4),
@@ -1764,18 +1799,17 @@ def solve_optimization(
                     "m2": round(miktar_m2, 2),
                 })
             else:
-                x_val = float(pulp.value(x[(i, j)]) or 0.0)
-                miktar_kg = max(0, int(round(x_val)))
+                miktar_kg = _lp_kg_flow_to_int(float(pulp.value(x[(i, j)]) or 0.0))
                 if miktar_kg > 0:
                     miktar_ton = _kg_int_to_ton(miktar_kg)
-                    miktar_m2 = (miktar_kg / rho_kg_per_m2) if rho_kg_per_m2 > 0 else 0.0
-                    panel_count = int(round(miktar_kg / birim_kg[j])) if birim_kg[j] > 0 else 0
-                    pl = panel_lengths[j] if j < len(panel_lengths) else 1.0
+                    panel_count, miktar_m2 = _panel_count_and_m2_from_kg(
+                        miktar_kg, pw, pl, rho_kg_per_m2
+                    )
                     cutting_plan.append({
                         "rollId": i + 1,
                         "orderId": j + 1,
                         "panelCount": panel_count,
-                        "panelWidth": panel_widths[j],
+                        "panelWidth": pw,
                         "panelLength": pl,
                         "tonnage": round(miktar_ton, 4),
                         "m2": round(miktar_m2, 2),
@@ -1841,8 +1875,7 @@ def solve_optimization(
             item["unusedRollTonnage"] = cap_ton
             toplam_eldeki_kg += cap_kg
             continue
-        used_val = float(pulp.value(u[i]) or 0.0)
-        used_kg = min(cap_kg, max(0, _ton_to_kg_int(used_val)))
+        used_kg = min(cap_kg, _lp_kg_flow_to_int(float(pulp.value(u[i]) or 0.0)))
         rem_kg = cap_kg - used_kg
         fire_kg, stock_kg = _split_remainder_kg(rem_kg)
         used_kg = cap_kg - fire_kg - stock_kg

@@ -860,6 +860,67 @@ class TestOptimizationConsistency(unittest.TestCase):
             msg="Talep tonajı panel yuvarlama nedeniyle artmamalı",
         )
 
+    def test_narrow_roll_shows_fire_and_exact_order_m2(self):
+        """
+        204 m² / 1,23 t dar bobin senaryosunda plan m² sipariş hedefini korumalı;
+        bobin artığı (kg ızgarası) fire olarak raporlanmalı.
+        """
+        orders = _make_orders([204], panel_width=1.0, panel_length=1.0)
+        rolls = [1.23, 1.23, 10.0, 10.0]
+        status, results = solve_optimization(
+            thickness=0.75,
+            density=7.85,
+            orders=orders,
+            panel_widths=[1.0],
+            panel_lengths=[1.0],
+            rolls=rolls,
+            max_orders_per_roll=5,
+            max_rolls_per_order=5,
+            fire_cost=450,
+            setup_cost=100,
+            stock_cost=50,
+            time_limit_seconds=30,
+            surface_factor=2.0,
+            roll_open_mask=[True, True, False, False],
+        )
+        self.assertEqual(status, "Optimal")
+        cutting_plan = results["cuttingPlan"]
+        total_m2 = sum(float(row["m2"]) for row in cutting_plan)
+        self.assertAlmostEqual(
+            total_m2,
+            408.0,
+            places=2,
+            msg="Kesim planı toplam m² çift yüzey talebi (204×2) ile uyumlu olmalı",
+        )
+        per_surface_m2 = total_m2 / 2.0
+        self.assertAlmostEqual(
+            per_surface_m2,
+            204.0,
+            places=2,
+            msg="Yüzey başı plan m² sipariş hedefi 204 olmalı",
+        )
+        opened = [r for r in results["rollStatus"] if float(r.get("used", 0) or 0) > 0]
+        self.assertEqual(len(opened), 2, msg="İki dar bobin açılmalı")
+        total_fire = float(results["summary"]["totalFire"])
+        self.assertGreater(
+            total_fire,
+            0.0,
+            msg="Dar bobin artığı fire olarak görünmeli",
+        )
+        self.assertAlmostEqual(
+            total_fire,
+            0.058,
+            places=3,
+            msg="İki bobinde toplam ~58 kg fire beklenir",
+        )
+        for item in opened:
+            self.assertAlmostEqual(
+                float(item["fire"]),
+                0.029,
+                places=3,
+                msg=f"Rulo {item['rollId']} fire ~29 kg olmalı",
+            )
+
     def test_equal_stock_tie_prefers_fewer_stock_rolls(self):
         """
         Eş stok tonajı/maliyet senaryosunda, çözüm daha az sayıda stok rulosu üreten seçeneği tercih etmeli.
