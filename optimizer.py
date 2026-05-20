@@ -105,6 +105,67 @@ def _panel_count_and_m2_from_kg(
     return panel_count, panel_count * panel_area_m2
 
 
+def _infer_rho_kg_per_m2_from_row(row: Dict) -> float:
+    """
+    Kesim planı satırından kg/m² yoğunluğunu türetir (panel ızgarası m² ile tutarlı).
+
+    Args:
+        row: Kesim planı satırı (tonnage, m2, panelWidth, panelLength).
+
+    Returns:
+        kg/m²; türetilemezse 0.
+    """
+    row_ton = float(row.get("tonnage") or 0.0)
+    row_m2 = float(row.get("m2") or 0.0)
+    row_kg = _ton_to_kg_int(row_ton)
+    if row_kg > 0 and row_m2 > 0:
+        return row_kg / row_m2
+    pw = float(row.get("panelWidth") or 1.0)
+    pl = float(row.get("panelLength") or 1.0)
+    panel_area = pw * pl
+    if row_kg > 0 and panel_area > 0:
+        panel_count = max(1, int(round(row_kg / max(panel_area, 1e-9))))
+        return row_kg / (panel_count * panel_area)
+    return 0.0
+
+
+def _surface_m2_from_row_kg(row: Dict, surface_kg: int, is_upper: bool) -> float:
+    """
+    Tek yüzey dilimi için panel ızgarasına yuvarlanmış m² döner.
+
+    Args:
+        row: Kesim planı satırı.
+        surface_kg: Yüzey kesim kg (tam sayı).
+        is_upper: Üst yüzey dilimi mi.
+
+    Returns:
+        Panel adedi × panel alanı (m²).
+    """
+    if surface_kg <= 0:
+        return 0.0
+    row_ton = float(row.get("tonnage") or 0.0)
+    if is_upper:
+        surface_ton = float(row.get("upperTonnage") or 0.0)
+        if surface_ton < 1e-9 and row_ton > 1e-9:
+            surface_ton = row_ton
+        stored_m2 = row.get("upperM2")
+    else:
+        surface_ton = float(row.get("lowerTonnage") or 0.0)
+        if surface_ton < 1e-9 and row_ton > 1e-9:
+            surface_ton = row_ton
+        stored_m2 = row.get("lowerM2")
+    if stored_m2 is not None and _ton_to_kg_int(surface_ton) == surface_kg:
+        return float(stored_m2)
+    pw = float(row.get("panelWidth") or 1.0)
+    pl = float(row.get("panelLength") or 1.0)
+    rho = _infer_rho_kg_per_m2_from_row(row)
+    if rho <= 0:
+        row_m2 = float(row.get("m2") or 0.0)
+        return row_m2 * (surface_kg / _ton_to_kg_int(row_ton)) if _ton_to_kg_int(row_ton) > 0 else 0.0
+    _, m2_val = _panel_count_and_m2_from_kg(surface_kg, pw, pl, rho)
+    return float(m2_val)
+
+
 def _split_remainder_for_reporting(rem_ton: float) -> Tuple[float, float]:
     """
     Ton cinsinden kalanı kg'ye taşıyıp böler; API ton alanları için (geriye dönük yardımcı).
@@ -563,7 +624,7 @@ def _rows_to_surface_queue(rows: List[Dict], is_upper: bool) -> deque:
         ton_kg = _ton_to_kg_int(t)
         if ton_kg <= 0:
             continue
-        m2_alloc = row_m2 * (t / row_ton) if row_ton > 1e-9 else row_m2
+        m2_alloc = _surface_m2_from_row_kg(r, ton_kg, is_upper)
         m2_per_kg = (m2_alloc / ton_kg) if ton_kg > 0 else 0.0
         q.append({
             "rollId": int(r["rollId"]),
@@ -675,6 +736,10 @@ def build_symmetric_steps_for_order(
             sum_u,
             sum_l,
         )
+    ref_row = order_rows[0]
+    panel_width = float(ref_row.get("panelWidth") or 1.0)
+    panel_length = float(ref_row.get("panelLength") or 1.0)
+    rho_kg_per_m2 = _infer_rho_kg_per_m2_from_row(ref_row)
     steps: List[Dict] = []
     eps = 1e-9
     while uq and lq:
@@ -690,8 +755,17 @@ def build_symmetric_steps_for_order(
                 lq.popleft()
             continue
         step_ton = _kg_int_to_ton(step_kg)
-        u_m2_step = float(u["m2"]) if step_kg == u_kg else float(u["m2PerKg"]) * step_kg
-        l_m2_step = float(l["m2"]) if step_kg == l_kg else float(l["m2PerKg"]) * step_kg
+        if rho_kg_per_m2 > 0:
+            _, step_m2 = _panel_count_and_m2_from_kg(
+                step_kg, panel_width, panel_length, rho_kg_per_m2
+            )
+        else:
+            step_m2 = min(
+                float(u["m2"]) if step_kg == u_kg else float(u["m2PerKg"]) * step_kg,
+                float(l["m2"]) if step_kg == l_kg else float(l["m2PerKg"]) * step_kg,
+            )
+        u_m2_step = step_m2
+        l_m2_step = step_m2
         cuts = [
             {
                 "orderId": oid,
@@ -790,25 +864,25 @@ def _extract_legacy_index_pairing_ops(cutting_plan: List[Dict]) -> List[Dict]:
             cuts: List[Dict] = []
             if upper_row is not None:
                 ut = float(upper_row.get("upperTonnage") or 0.0) or float(upper_row.get("tonnage") or 0.0)
-                um2 = float(upper_row.get("m2") or 0.0)
-                row_ton = float(upper_row.get("tonnage") or 1.0)
+                ut_kg = _ton_to_kg_int(ut)
+                um2 = _surface_m2_from_row_kg(upper_row, ut_kg, True)
                 cuts.append({
                     "orderId": oid,
                     "rollId": int(upper_row["rollId"]),
                     "tonnage": round(ut, 4),
-                    "m2": round(um2 * (ut / row_ton) if row_ton > 1e-9 else um2, 4),
+                    "m2": round(um2, 4),
                     "upperTonnage": round(float(upper_row.get("upperTonnage") or 0.0), 4),
                     "lowerTonnage": 0.0,
                 })
             if lower_row is not None:
                 lt = float(lower_row.get("lowerTonnage") or 0.0) or float(lower_row.get("tonnage") or 0.0)
-                lm2 = float(lower_row.get("m2") or 0.0)
-                tot = float(lower_row.get("tonnage") or 0.0)
+                lt_kg = _ton_to_kg_int(lt)
+                lm2 = _surface_m2_from_row_kg(lower_row, lt_kg, False)
                 cuts.append({
                     "orderId": oid,
                     "rollId": int(lower_row["rollId"]),
                     "tonnage": round(lt, 4),
-                    "m2": round(lm2 * (lt / tot) if tot > 1e-9 else lm2, 4),
+                    "m2": round(lm2, 4),
                     "upperTonnage": 0.0,
                     "lowerTonnage": round(float(lower_row.get("lowerTonnage") or 0.0), 4),
                 })
@@ -1784,6 +1858,8 @@ def solve_optimization(
                     continue
                 miktar_kg = tu_kg + tl_kg
                 miktar_ton = _kg_int_to_ton(miktar_kg)
+                _, tu_m2 = _panel_count_and_m2_from_kg(tu_kg, pw, pl, rho_kg_per_m2)
+                _, tl_m2 = _panel_count_and_m2_from_kg(tl_kg, pw, pl, rho_kg_per_m2)
                 panel_count, miktar_m2 = _panel_count_and_m2_from_kg(
                     miktar_kg, pw, pl, rho_kg_per_m2
                 )
@@ -1796,7 +1872,9 @@ def solve_optimization(
                     "tonnage": round(miktar_ton, 4),
                     "upperTonnage": round(_kg_int_to_ton(tu_kg), 4),
                     "lowerTonnage": round(_kg_int_to_ton(tl_kg), 4),
-                    "m2": round(miktar_m2, 2),
+                    "upperM2": round(tu_m2, 2),
+                    "lowerM2": round(tl_m2, 2),
+                    "m2": round(tu_m2 + tl_m2, 2),
                 })
             else:
                 miktar_kg = _lp_kg_flow_to_int(float(pulp.value(x[(i, j)]) or 0.0))

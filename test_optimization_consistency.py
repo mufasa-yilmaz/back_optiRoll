@@ -1011,12 +1011,30 @@ class TestOptimizationConsistency(unittest.TestCase):
             cuts = step.get("cuts", [])
             if len(cuts) != 2:
                 continue
+            u_ton = float(cuts[0].get("tonnage", 0.0) or 0.0)
+            l_ton = float(cuts[1].get("tonnage", 0.0) or 0.0)
+            u_m2 = float(cuts[0].get("m2", 0.0) or 0.0)
+            l_m2 = float(cuts[1].get("m2", 0.0) or 0.0)
             self.assertAlmostEqual(
-                float(cuts[0].get("tonnage", 0.0) or 0.0),
-                float(cuts[1].get("tonnage", 0.0) or 0.0),
+                u_ton,
+                l_ton,
                 places=4,
                 msg=f"Adım {step.get('step')}: üst/alt tonaj eşit olmalı",
             )
+            self.assertAlmostEqual(
+                u_m2,
+                l_m2,
+                places=4,
+                msg=f"Adım {step.get('step')}: üst/alt m² eşit olmalı",
+            )
+            if u_m2 > 1e-6:
+                panels = u_m2 / 1.0
+                self.assertAlmostEqual(
+                    panels,
+                    round(panels),
+                    places=6,
+                    msg=f"Adım {step.get('step')}: m² tam panel katı olmalı (panel 1×1 m)",
+                )
 
     def test_siki_has_at_least_serbest_synchronous_changes_on_given_case(self):
         """
