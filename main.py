@@ -69,6 +69,12 @@ from supabase_client import (
 
 app = FastAPI(title="Kesme Stoku Optimizasyon API")
 
+logger.info(
+    "API modülü yüklendi. PORT=%s, Supabase=%s",
+    os.environ.get("PORT", "8000"),
+    "tanımlı" if (os.getenv("SUPABASE_URL") or "").strip() else "yok",
+)
+
 # Optimizasyon tek senaryo: sipariş m² tek yüzey, talep her zaman çift yüzey (2x) ile hesaplanır.
 SURFACE_FACTOR_OPTIMIZE = 2.0
 
@@ -144,16 +150,36 @@ def _get_run_row_or_http_exception(file_id: str) -> Dict:
         raise HTTPException(status_code=404, detail="Çalıştırma bulunamadı")
     return run
 
-# CORS ayarları: lokal ve production frontend origin'lerini izinli yap
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+def _cors_allowed_origins() -> List[str]:
+    """
+    CORS izin listesini varsayılan origin'ler ile CORS_ORIGINS ortam değişkeninden birleştirir.
+
+    Returns:
+        Tekrar etmeyen origin listesi
+    """
+    defaults = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "https://www.optiroll.pro",
         "https://optiroll.pro",
-        "https://3d-web-iduh-4os6uvukk-umuts-projects-ef16418a.vercel.app",
-    ],
+    ]
+    extra = os.environ.get("CORS_ORIGINS", "")
+    from_env = [origin.strip() for origin in extra.split(",") if origin.strip()]
+    seen: set[str] = set()
+    merged: List[str] = []
+    for origin in defaults + from_env:
+        if origin not in seen:
+            seen.add(origin)
+            merged.append(origin)
+    return merged
+
+
+# CORS: doğrudan tarayıcı istekleri + Vercel preview / optiroll alt alan adları
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allowed_origins(),
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*(optiroll\.pro|vercel\.app)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -510,6 +536,12 @@ def _validate_order_area_divisibility_or_raise(
 async def root():
     """API root endpoint"""
     return {"message": "Kesme Stoku Optimizasyon API", "version": "1.0.0"}
+
+
+@app.get("/health")
+async def health():
+    """Railway / uptime probe için hafif sağlık kontrolü."""
+    return {"ok": True}
 
 
 def _resolve_strategy_modes(request: OptimizeRequest) -> List[Literal["az", "orta", "cok", "eszamanli"]]:
